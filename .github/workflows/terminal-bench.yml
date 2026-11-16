@@ -1,0 +1,118 @@
+# Terminal-Bench 2.0 task images for arm64.
+#
+# Upstream publishes the 89 task images for amd64 only (docker.io/alexgshaw/<task>:<tag>). This builds each task's
+# own environment/Dockerfile natively on an arm64 runner and publishes, per task:
+#   ghcr.io/milabench/terminal-bench/<task>:<tag>-arm64   our build
+#   ghcr.io/milabench/terminal-bench/<task>:<tag>         multi-arch: upstream amd64 + our arm64
+# Images that already exist are skipped unless `rebuild` is set.
+name: terminal-bench images
+
+on:
+  workflow_dispatch:
+    inputs:
+      tasks:
+        description: "Task names, space separated (empty: all in terminal-bench/images.json)"
+        required: false
+        default: ""
+      rebuild:
+        description: "Rebuild images that already exist"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths: [terminal-bench/images.json, .github/workflows/terminal-bench.yml]
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io/${{ github.repository_owner }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      tasks: ${{ steps.tasks.outputs.tasks }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: tasks
+        run: |
+          if [ -n "${{ inputs.tasks }}" ]; then
+            echo "tasks=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' ${{ inputs.tasks }})" >> "$GITHUB_OUTPUT"
+          else
+            echo "tasks=$(python3 scripts/tb2_images.py list)" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: plan
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix:
+        task: ${{ fromJSON(needs.plan.outputs.tasks) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - name: Image names
+        id: names
+        run: |
+          python3 scripts/tb2_images.py target "${{ matrix.task }}" > target.json
+          for k in upstream arm64 multiarch; do echo "$k=$(jq -r .$k target.json)" >> "$GITHUB_OUTPUT"; done
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Already built?
+        id: exists
+        run: |
+          if [ "${{ inputs.rebuild }}" != "true" ] && docker buildx imagetools inspect "${{ steps.names.outputs.multiarch }}" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Task sources (harbor download)
+        if: steps.exists.outputs.skip != 'true'
+        run: |
+          pip install -q "harbor==$(jq -r .harbor terminal-bench/images.json)"
+          harbor download "$(jq -r .dataset terminal-bench/images.json)" -o src
+          test -f "src/terminal-bench/${{ matrix.task }}/environment/Dockerfile"
+      - name: Free disk (large tasks need ~20 GB)
+        if: steps.exists.outputs.skip != 'true'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          docker system prune -af >/dev/null || true
+          df -h /
+      - uses: docker/setup-buildx-action@v3
+        if: steps.exists.outputs.skip != 'true'
+      - name: Build arm64
+        if: steps.exists.outputs.skip != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: src/terminal-bench/${{ matrix.task }}/environment
+          platforms: linux/arm64
+          push: true
+          provenance: false
+          tags: ${{ steps.names.outputs.arm64 }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.milabench.terminal-bench.task=${{ matrix.task }}
+            org.milabench.terminal-bench.upstream=${{ steps.names.outputs.upstream }}
+      - name: Multi-arch manifest (upstream amd64 + our arm64)
+        if: steps.exists.outputs.skip != 'true'
+        run: |
+          amd64=$(docker buildx imagetools inspect "${{ steps.names.outputs.upstream }}" --format '{{json .Manifest}}' \
+                  | jq -r 'if .manifests then (.manifests[] | select(.platform.architecture=="amd64") | .digest) else .digest end')
+          repo="${{ steps.names.outputs.upstream }}"; repo="${repo%:*}"
+          docker buildx imagetools create -t "${{ steps.names.outputs.multiarch }}" \
+            "$repo@$amd64" "${{ steps.names.outputs.arm64 }}"
+          docker buildx imagetools inspect "${{ steps.names.outputs.multiarch }}"
+
+  summary:
+    needs: build
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo "Build results per task are in the build jobs; failed tasks have no multi-arch tag (milabench skips them)."
