@@ -23,5 +23,15 @@ files work on x86_64 and aarch64. A task whose build fails has no multi-arch tag
 - After the first run, make the `terminal-bench/*` packages public (GitHub -> milabench -> Packages -> settings)
   so the nodes pull without logging in.
 
+### Patches
+
+`terminal-bench/patches/<task>/` is copied over the task's `environment/` before the build (label
+`org.milabench.terminal-bench.patched=true`). Only for tasks that no longer build from their upstream sources:
+
+| task | why | patch |
+|---|---|---|
+| fix-git | `setup.sh` clones github.com/TheMikeMerrill/personal-site, deleted upstream | copy the repo state `setup.sh` produced (`/app/personal-site`, `/root/.gitconfig`) from the upstream amd64 image; files only |
+| qemu-startup, qemu-alpine-ssh | `debian:bullseye` left the regular mirrors (LTS ended 2026-08), packages 404 | apt pinned to snapshot.debian.org at 20251031, the upstream build date |
+
 Known arm64 risks: caffe-cifar-10, install-windows-3.11, qemu-startup, qemu-alpine-ssh (x86 guests under TCG),
 custom-memory-heap-crash (builds GCC twice: slow), mteb-leaderboard / mteb-retrieve (~20 GB images).

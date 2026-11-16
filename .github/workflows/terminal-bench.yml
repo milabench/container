@@ -20,7 +20,7 @@ on:
         default: false
   push:
     branches: [main]
-    paths: [terminal-bench/images.json, .github/workflows/terminal-bench.yml]
+    paths: [terminal-bench/images.json, terminal-bench/patches/**, .github/workflows/terminal-bench.yml]
 
 permissions:
   contents: read
@@ -79,6 +79,17 @@ jobs:
           pip install -q "harbor==$(jq -r .harbor terminal-bench/images.json)"
           harbor download "$(jq -r .dataset terminal-bench/images.json)" -o src
           test -f "src/terminal-bench/${{ matrix.task }}/environment/Dockerfile"
+      - name: Apply milabench patch (terminal-bench/patches/<task>, if any)
+        if: steps.exists.outputs.skip != 'true'
+        id: patch
+        run: |
+          p="terminal-bench/patches/${{ matrix.task }}"
+          if [ -d "$p" ]; then
+            cp -rv "$p"/. "src/terminal-bench/${{ matrix.task }}/environment/"
+            echo "patched=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "patched=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Free disk (large tasks need ~20 GB)
         if: steps.exists.outputs.skip != 'true'
         run: |
@@ -100,6 +111,7 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.milabench.terminal-bench.task=${{ matrix.task }}
             org.milabench.terminal-bench.upstream=${{ steps.names.outputs.upstream }}
+            org.milabench.terminal-bench.patched=${{ steps.patch.outputs.patched }}
       - name: Multi-arch manifest (upstream amd64 + our arm64)
         if: steps.exists.outputs.skip != 'true'
         run: |
